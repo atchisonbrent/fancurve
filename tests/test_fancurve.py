@@ -923,6 +923,17 @@ esac''',
         self.assertEqual((self.root / "privileged").read_text(), "")
         self.assertEqual(list((self.root / "real-parent").iterdir()), [])
 
+    def test_a_stranded_previous_copy_is_not_restored_from_a_symbolic_link(self) -> None:
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        Path(f"{self.dest}.old").symlink_to(elsewhere)
+        done = self.invoke("install")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f"{self.dest}.old is a symbolic link; a root job cannot be installed safely through it", done.stderr)
+        self.assertFalse(self.dest.exists() or self.dest.is_symlink(), "the link was not moved into place")
+        self.assertNotIn("fancurve auto", self.calls.read_text())
+        Path(f"{self.dest}.old").unlink()
+
     def test_uninstall_runs_nothing_as_root_from_an_unsafe_path(self) -> None:
         self.old_install(loaded=False)
         shutil.copy(self.root / "controller", self.dest / "fancurve")

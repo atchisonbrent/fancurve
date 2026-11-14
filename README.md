@@ -112,7 +112,7 @@ If no default prefix matches, `./fancurve sensors` lists every temperature key o
 python3 -m unittest discover -s tests
 ```
 
-The control loop, the write test and the installer are tested without hardware, root or launchd: the program has a simulation mode with stand-in hardware, and the installer runs against stand-ins for `sudo` and `launchctl`. What no test reaches is the SMC itself: finding the fan's mode key, enumerating the sensors, and the `check` and `sensors` output run only on a real Mac. That is what `check` and the write test are for.
+The control loop, the write test and the installer are tested without hardware, root or launchd: the program has a simulation mode with stand-in hardware, and the installer runs against stand-ins for `sudo` and `launchctl`. The code that talks to the SMC (finding the fan's mode key, enumerating sensors, `check`, `sensors`, `auto` and the write test) is compiled for the tests against a stand-in SMC. What no test reaches is a real one; that is what `check` and the write test are for.
 
 ## Credit
 

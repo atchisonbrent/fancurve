@@ -147,7 +147,9 @@ the previous controller is stopped and its files are still in place."
     "$tmp/fancurve" check fancurve.conf
     begin_privileged
     # Stage beside the destination so replacement requires only renames.
-    if [ ! -e "$dest" ] && [ -e "$dest.old" ]; then
+    if [ ! -e "$dest" ] && { [ -e "$dest.old" ] || [ -L "$dest.old" ]; }; then
+        # It becomes the installed directory, so it gets the same scrutiny.
+        safe_path "$dest.old" || exit 1
         as_root mv "$dest.old" "$dest"
     fi
     [ ! -e "$dest" ] || previous_files=1
