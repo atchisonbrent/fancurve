@@ -8,8 +8,8 @@ Left to macOS, a Mac mini holds its fan near minimum while the chip sits at abou
 
 - Reads the hottest of a group of chip sensors every 2 seconds and acts on the **average of the last 30 seconds**, so a short spike does not move the fan.
 - Below 80 °C, macOS keeps the fan. Nothing changes at the desktop.
-- From 80 °C it holds the fan on a straight line from the fan's minimum to **2,400 rpm at 90 °C**, and never asks for more. That ceiling is the limit on noise.
-- It changes speed by at most 25 rpm a second, so the fan never jumps.
+- From 80 °C it holds the fan on a straight line from the fan's minimum to **2,400 rpm at 90 °C**, and the curve never asks for more. That ceiling is the limit on noise.
+- It changes speed by at most 25 rpm a second, so the fan does not jump. (The one exception goes downward: a target it finds above the ceiling is brought down to it at once.)
 - Below 74 °C it gives the fan back to macOS.
 - Whenever it cannot do its job (a sensor reading fails, the fan's state cannot be read, a write is refused), it gives the fan back to macOS and says so in its log.
 
@@ -24,12 +24,12 @@ The defaults favour quiet over cool. On an M6 Mac mini, which runs games at 97 t
 | M6 Mac mini (`Mac18,5`), macOS 27.0 | In daily use. |
 | M2 Mac mini (`Mac14,3`), macOS 27.0.1 | Reads work (`fancurve check`). Fan writes have not been tried. |
 | Other Apple Silicon Macs with one fan, such as the M5 and M5 Pro Mac mini | Not tried. The installer finds out: see below. |
-| Macs with two or more fans, Macs with none, Intel Macs | Not supported; `check` refuses them. |
+| Macs with two or more fans, Macs with none, Intel Macs | Not supported; `check` or the installer refuses them. |
 
-It talks to the SMC, the chip that runs the fan, through keys Apple does not document. Two things differ between Macs, and the installer tests both before it installs anything:
+It talks to the SMC, the chip that runs the fan, through keys Apple does not document. Two things differ between Macs. The installer tests the first before it installs anything; the second it can only show you:
 
 - **Whether the Mac accepts fan writes.** The installer runs a write test: it holds the fan 300 rpm away from where it is for a few seconds, checks that the fan follows, and returns it to macOS. If that fails, nothing is installed. Some Macs guard fan writes behind a second key, `Ftst`, which fancurve does not use; `check` tells you if yours has it. (The source of the [Stats](https://github.com/exelban/stats) app says M1 to M4 Macs need it and M5 and later do not. The M2 above, on macOS 27, no longer has the key.)
-- **Which sensors are chip temperatures.** Sensor names differ between chip families. `check` lists what each configured group reads; on an idle Mac they should all be well under 80 °C. If one group reads hot at idle, it is not a chip temperature on your Mac: take it out of `sensors`. If no group matches, see "Other Macs" below.
+- **Which sensors are chip temperatures.** Sensor names differ between chip families. `check`, which the installer runs and prints, lists what each configured group reads. On a Mac that is idle and has had time to cool, they should all be well under 80 °C. A group that still reads hot then is probably not a chip temperature on your Mac; see "Other Macs" below before taking it out, and also if no group matches. This judgment is yours: the installer does not stop for it.
 
 If you try it on a Mac not listed, the output of `fancurve check` and of the install is worth sending in an issue, whether it worked or not.
 
@@ -43,7 +43,7 @@ cd fancurve
 ./install.sh
 ```
 
-The installer builds the program, runs the read-only check, asks for your password, runs the write test, and installs:
+The installer builds the program, runs the read-only check, asks for your password, runs the write test, and installs. It refuses if `/usr/local` or `/usr/local/libexec` is not owned by root or is writable by other users, because a root job under such a directory could be swapped out.
 
 | Where | What |
 |---|---|
@@ -73,24 +73,29 @@ cc -O2 fancurve.c -o fancurve -framework IOKit -framework CoreFoundation
 | `start` | `80` | average temperature (°C) at which fancurve takes the fan |
 | `full` | `90` | temperature at which the line reaches `max_rpm` |
 | `hysteresis` | `6` | the fan goes back to macOS below `start - hysteresis` |
-| `max_rpm` | `2400` | the most it will ever ask for |
-| `ramp` | `25` | the most the speed changes in a second, in rpm |
+| `max_rpm` | `2400` | the most the curve will ask for |
+| `ramp` | `25` | the most the speed changes in a second, in rpm (a target above `max_rpm` comes down at once) |
 | `interval` | `2` | seconds between readings |
 | `window` | `30` | seconds of readings averaged |
 
 All keys are required. Out-of-range values are refused by `check`, and so by the installer, before the running controller is touched.
 
+The installer's write test is the one thing that can pass `max_rpm`: if `max_rpm` is set within 600 rpm of the fan's minimum, the test's 300 rpm step may have nowhere else to go, and it runs the fan up to 300 rpm past `max_rpm` for a few seconds.
+
 ### Other Macs: choosing sensors
 
-The default prefixes are chip temperatures on the M6 and M2 Mac mini: regulators beside the chip (`TVD`, `TCM`), performance cores (`TP`, `Tp`), GPU (`Tg`) and efficiency cores (`Te`). On another chip family, run `./fancurve check fancurve.conf` at idle and again under load. Keep the groups that sit at 30 to 60 °C at idle and climb under load. A prefix that is a core temperature on one family can be something else on another: `Tf` is the cores on M3 Macs according to Stats, and on the M2 it includes a sensor that reads 97 °C at idle.
+The default prefixes are chip temperatures on the M6 and M2 Mac mini: regulators beside the chip (`TVD`, `TCM`), performance cores (`TP`, `Tp`), GPU (`Tg`) and efficiency cores (`Te`). On another chip family, run `./fancurve check fancurve.conf` with the Mac idle and cool, and again under load. Keep the groups that sit at 30 to 60 °C at idle and climb together under load; take a group out only after it has read hot on a Mac that has had time to cool. A prefix that is a core temperature on one family can be something else on another: `Tf` is the cores on M3 Macs according to Stats, and on the M2 it includes a sensor that reads 97 °C at idle.
+
+If no default prefix matches, `./fancurve sensors` lists every temperature key on your Mac by its first two letters, with how many there are and what they read. Run it idle and under load to find the groups that behave like the chip, and put their prefixes in `sensors`.
 
 ## When something goes wrong
 
-- A reading counts only if at least half the sensors that have ever answered still do. Three failed readings in a row return the fan to macOS; after a minute of them the controller exits and launchd starts it afresh.
+- A reading counts only if at least half the sensors that have ever answered still do. Three failed readings in a row return the fan to macOS; after 30 in a row (a minute at the default interval) the controller exits and launchd starts it afresh.
 - Each pass it reads the fan's mode and target back and corrects what differs. A fan it finds held while the Mac is cool is released.
 - A release counts only when the mode reads back as automatic. Until then it is retried every pass and the log says the release is not confirmed.
 - If macOS is already running the fan faster than `max_rpm`, fancurve leaves it alone.
-- `sudo /usr/local/libexec/fancurve/fancurve auto` returns the fan to macOS by hand and confirms it.
+- To take the fan away from fancurve until the next restart: `sudo launchctl bootout system/io.github.atchisonbrent.fancurve`. It returns the fan to macOS as it stops. With the job stopped, `sudo /usr/local/libexec/fancurve/fancurve auto` returns the fan by hand and confirms it; while the job is running it would simply take the fan again.
+- The write test and the controller return the fan when they are interrupted, hung up on or stopped. Nothing can do that for a process that is killed outright (`kill -9`): the controller is restarted by launchd about 30 seconds later and puts it right, and after a killed write test the `auto` command above, or the one the installer names in its last line, returns the fan.
 
 ## Limits
 

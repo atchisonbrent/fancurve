@@ -19,6 +19,7 @@
 //
 //   fancurve check CONF      validate the settings and the hardware; changes nothing
 //   fancurve status CONF     one reading of the fan and the sensors
+//   fancurve sensors         list temperature sensor groups; changes nothing
 //   fancurve run CONF        the controller (root)
 //   fancurve auto            return the fan to macOS and confirm it (root)
 //   fancurve selftest CONF   test fan writes, then return the fan to macOS (root)
@@ -184,6 +185,8 @@ static struct {
     double temp, target, actual;
     int plausible, mode, temps_fail, mode_unreadable, target_unreadable, actual_unreadable, mode_refused, target_refused, mode_stuck;
     int mode_reset, target_changed, never_follows, falls_short, release_stuck, interrupt;
+    double path[10];
+    int npath;
 } S;
 
 // The hottest plausible reading, and how many sensors gave one.
@@ -265,8 +268,12 @@ static int hw_init(const Conf *c) {
         int added = 0;
         for (int p = 0; p < c->nprefix; p++) {
             if (strncmp(k, c->prefix[p], strlen(c->prefix[p])) || !smc_is(k, "flt ", 4)) continue;
+            if (!added && nsensors == MAX_SENSORS) {
+                fprintf(stderr, "more than %d sensors match the configured prefixes; narrow sensors\n", MAX_SENSORS);
+                return -1;
+            }
             matched[p] = 1;
-            if (!added && nsensors < MAX_SENSORS) { sensor_prefix[nsensors] = p; strcpy(sensor[nsensors++], k); }
+            if (!added) { sensor_prefix[nsensors] = p; strcpy(sensor[nsensors++], k); }
             added = 1;
         }
     }
@@ -414,7 +421,7 @@ static void loop_init(Loop *l, const Conf *c) {
 
 static volatile sig_atomic_t stopping;
 static void on_signal(int s) { (void)s; stopping = 1; }
-static void catch_signals(void) { signal(SIGTERM, on_signal); signal(SIGINT, on_signal); }
+static void catch_signals(void) { signal(SIGTERM, on_signal); signal(SIGINT, on_signal); signal(SIGHUP, on_signal); signal(SIGQUIT, on_signal); }
 
 static int run(const Conf *c) {
     Loop l;
@@ -459,40 +466,69 @@ static int selftest(void) {
     target = base + 300 <= ceiling ? base + 300 : base - 300 >= fan_min ? base - 300 : fmin(base + 300, fan_max);
     if (fabs(target - base) < 200) { puts("the fan's speed range leaves no room for a write test"); return 1; }
     measured = before;
-    int near = 0;   // consecutive readings within 100 rpm of the target
+    double recent[3] = {0};
     const char *reason = "the SMC accepted the target but the fan did not follow it";
     int passed = 0;
     catch_signals();
+    void (*previous_tstp)(int) = signal(SIGTSTP, on_signal);
     if (stopping) reason = "interrupted";
-    else if (hw_set_mode(1) || hw_set_target(target)) reason = "this Mac refused the fan write";
+    else if (hw_set_mode(1)) {
+        if (!hw_mode(&mode) && mode == 0) {
+            signal(SIGTSTP, previous_tstp);
+            puts("this Mac refused the fan write; the fan was never taken and is with macOS");
+            return 1;
+        }
+        reason = "this Mac refused the fan write";
+    }
+    else if (hw_set_target(target)) reason = "this Mac refused the fan write";
     else for (int second = 1; second <= 10; second++) {
         if (!sim && !stopping) sleep(1);
         if (sim) {
             if (S.mode_reset) S.mode = 0;
             if (S.target_changed) S.target = target + 2;
-            if (S.mode == 1 && !S.never_follows) S.actual = S.falls_short ? (S.target + before) / 2 : S.target;
-            if (S.interrupt) raise(SIGTERM);
+            if (S.npath) S.actual = S.path[second <= S.npath ? second - 1 : S.npath - 1];
+            else if (S.mode == 1 && !S.never_follows) S.actual = S.falls_short ? (S.target + before) / 2 : S.target;
+            if (S.interrupt) raise(S.interrupt);
         }
         if (stopping) { reason = "interrupted"; break; }
         double readback;
-        if (hw_mode(&mode) || mode != 1 || hw_target(&readback) || fabs(readback - target) > 1) {
-            reason = "the fan did not stay held: macOS took it back or the target changed"; break;
-        }
+        if (hw_mode(&mode)) { reason = "the fan's mode could not be read back"; break; }
+        if (mode != 1) { reason = "manual mode did not hold: the write was ignored or macOS took the fan back"; break; }
+        if (hw_target(&readback)) { reason = "the fan's target could not be read back"; break; }
+        if (fabs(readback - target) > 1) { reason = "the fan's target changed after it was written"; break; }
         if (hw_actual(&measured)) { reason = "the fan's measured speed cannot be read"; break; }
         // Settled at the target, not merely passing through it.
-        near = fabs(measured - target) <= 100 ? near + 1 : 0;
-        if (second >= 3 && near >= 2) { passed = 1; break; }
+        recent[(second - 1) % 3] = measured;
+        if (second >= 3) {
+            double low = fmin(recent[0], fmin(recent[1], recent[2]));
+            double high = fmax(recent[0], fmax(recent[1], recent[2]));
+            if (fabs(low - target) <= 100 && fabs(high - target) <= 100 && high - low <= 50) { passed = 1; break; }
+        }
     }
     if (stopping) { passed = 0; reason = "interrupted"; }
     // In this test, mode-stuck models a release that is accepted but ignored.
     if (sim && S.release_stuck) S.mode_stuck = 1;
-    int failed_release = hw_release();
+    int failed_release = !hw_mode(&mode) && mode == 0 ? 0 : hw_release();
+    signal(SIGTSTP, previous_tstp);
     if (!passed) puts(reason);
     if (failed_release) { puts("could NOT return the fan to macOS"); return 1; }
     if (!passed) { puts("fan returned to macOS"); return 1; }
     printf("write test passed: fan held at %.0f rpm, measured %.0f rpm (was %.0f), and returned to macOS\n",
            target, measured, before);
     return 0;
+}
+
+static int selftest_path(const char *text) {
+    S.npath = 0;
+    for (;;) {
+        char *end;
+        double v = strtod(text, &end);
+        if (end == text || !isfinite(v) || (*end && *end != ',')) return -1;
+        // The test lasts ten seconds; later entries cannot be reached.
+        if (S.npath < 10) S.path[S.npath++] = v;
+        if (!*end) return 0;
+        text = end + 1;
+    }
 }
 
 // Fault words persist for the whole write test. The existing simulation's
@@ -514,7 +550,11 @@ static int selftest_simulated(const char *path, int nwords, char **words) {
         else if (!strcmp(w, "never-follows")) S.never_follows = 1;
         else if (!strcmp(w, "falls-short")) S.falls_short = 1;
         else if (!strcmp(w, "mode-stuck")) S.release_stuck = 1;
-        else if (!strcmp(w, "interrupt")) S.interrupt = 1;
+        else if (!strcmp(w, "interrupt")) S.interrupt = SIGTERM;
+        else if (!strcmp(w, "hangup")) S.interrupt = SIGHUP;
+        else if (!strcmp(w, "quit")) S.interrupt = SIGQUIT;
+        else if (!strcmp(w, "suspend")) S.interrupt = SIGTSTP;
+        else if (!strncmp(w, "path=", 5) && !selftest_path(w + 5)) { }
         else if (!strncmp(w, "actual=", 7) && !parse_number(w + 7, &S.actual)) { }
         else { printf("unknown word: %s\n", w); goto done; }
     }
@@ -627,7 +667,7 @@ static void describe_prefixes(const Conf *c) {
         else printf("  %-4s %3d sensors, none answering with a plausible temperature\n", c->prefix[p], n);
     }
     if (hottest >= c->start)
-        printf("the reading is already at or above start (%g °C): if this Mac is idle, a prefix above matches sensors that are not chip temperatures; take it out of `sensors`\n", c->start);
+        printf("the reading is already at or above start (%g °C). If this Mac is idle and cool, one of the groups above is not a chip temperature here; compare the groups again after it has cooled and under load before taking one out of sensors\n", c->start);
 }
 
 static void identify_mac(void) {
@@ -636,21 +676,58 @@ static void identify_mac(void) {
     if (sysctlbyname("hw.model", model, &size, NULL, 0)) strcpy(model, "unknown model");
     size = sizeof version;
     if (sysctlbyname("kern.osproductversion", version, &size, NULL, 0)) strcpy(version, "unknown version");
-    printf("%s, macOS %s, fan mode key %s\n", model, version, mode_key);
+    printf("%s, macOS %s, fan mode key %s\n", model, version, mode_key ? mode_key : "none");
     SMCData in = {0}, out = {0};
     in.key = k2u("Ftst"); in.data8 = SMC_KEY_INFO;
     if (!smc_call(&in, &out))
         puts("this Mac has the older fan-unlock key (Ftst); fan writes may be refused, and fancurve does not use that key");
 }
 
+static int sensors(void) {
+    if (smc_open()) { fprintf(stderr, "cannot open the SMC\n"); return 1; }
+    mode_key = smc_is("F0md", "ui8 ", 1) ? "F0md" : smc_is("F0Md", "ui8 ", 1) ? "F0Md" : NULL;
+    identify_mac();
+    unsigned char b[4];
+    if (smc_read("#KEY", "ui32", 4, b)) { fprintf(stderr, "the SMC key count cannot be read\n"); return 1; }
+    UInt32 keys = ((UInt32)b[0] << 24) | ((UInt32)b[1] << 16) | ((UInt32)b[2] << 8) | b[3];
+    if (keys < 1 || keys > 20000) { fprintf(stderr, "implausible SMC key count %u\n", keys); return 1; }
+    struct { int n, plausible; double low, high; char which[5]; } group[256] = {0};
+    for (UInt32 i = 0; i < keys; i++) {
+        SMCData in = {0}, out = {0};
+        in.data8 = SMC_KEY_AT_INDEX; in.data32 = i;
+        if (smc_call(&in, &out)) continue;
+        char k[5];
+        u2k(out.key, k);
+        if (k[0] != 'T' || !smc_is(k, "flt ", 4)) continue;
+        unsigned char p = (unsigned char)k[1];
+        group[p].n++;
+        double v;
+        if (smc_float(k, &v) || v < 5 || v > 130) continue;
+        if (!group[p].plausible || v < group[p].low) group[p].low = v;
+        if (!group[p].plausible || v > group[p].high) { group[p].high = v; strcpy(group[p].which, k); }
+        group[p].plausible++;
+    }
+    for (int p = 0; p < 256; p++) {
+        if (!group[p].n) continue;
+        printf("  T%c %3d sensors, %d answering", p, group[p].n, group[p].plausible);
+        if (group[p].plausible) printf(": %.1f to %.1f °C (hottest %s)\n", group[p].low, group[p].high, group[p].which);
+        else puts(": no plausible temperatures");
+    }
+    puts("sensors that are chip temperatures sit near each other at idle and climb together under load");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *command = argc > 1 ? argv[1] : "";
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (!strcmp(command, "sensors") && argc == 2) return sensors();
     if (!strcmp(command, "auto") && argc == 2) {
         if (geteuid() != 0) { fprintf(stderr, "auto writes to the SMC and needs root\n"); return 2; }
         // Nothing but the mode key: this is the tool of last resort for a held fan.
         if (smc_open()) { fprintf(stderr, "cannot open the SMC\n"); return 1; }
         if (detect_mode_key()) return 1;
+        int mode;
+        if (!hw_mode(&mode) && mode == 0) { puts("the fan is with macOS"); return 0; }
         int failed = hw_release();
         printf(failed ? "could NOT return the fan to macOS\n" : "fan returned to macOS\n");
         return failed ? 1 : 0;
@@ -661,7 +738,7 @@ int main(int argc, char **argv) {
         return selftest_simulated(argv[2], argc - 3, argv + 3);
     Conf c;
     if (argc != 3 || (strcmp(command, "check") && strcmp(command, "status") && strcmp(command, "run") && strcmp(command, "simulate") && strcmp(command, "selftest"))) {
-        fprintf(stderr, "usage: fancurve check|status|run|selftest|simulate CONF, fancurve auto, fancurve run-simulated CONF [held], or fancurve selftest-simulated CONF [WORD...]\n");
+        fprintf(stderr, "usage: fancurve check|status|run|selftest|simulate CONF, fancurve auto|sensors, fancurve run-simulated CONF [held], or fancurve selftest-simulated CONF [WORD...]\n");
         return 2;
     }
     if (!strcmp(command, "run")) {
