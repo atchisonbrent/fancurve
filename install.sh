@@ -3,6 +3,8 @@
 # uninstall. Run from a checkout with ./install.sh [install|status|uninstall].
 # Only a marked test directory may redirect paths and retain the tests' PATH.
 if [ "${FANCURVE_TEST_ROOT+x}" = x ]; then
+    # Absolute, because the script changes directory below.
+    case "$FANCURVE_TEST_ROOT" in /*) ;; *) echo "FANCURVE_TEST_ROOT is set but is not a test directory" >&2; exit 1 ;; esac
     [ -f "$FANCURVE_TEST_ROOT/fancurve-test-root" ] || { echo "FANCURVE_TEST_ROOT is set but is not a test directory" >&2; exit 1; }
     dest=$FANCURVE_TEST_ROOT/dest
     jobs=$FANCURVE_TEST_ROOT/jobs
@@ -44,6 +46,31 @@ job_loaded() {
     *) echo "cannot tell whether $label is loaded (launchctl print exit $rc); stopping here" >&2; exit 1 ;;
     esac
 }
+# Root will run what is under this path, so the path itself and every directory
+# above it must be root's alone: owned by root, not writable by group or others,
+# and not a symbolic link (whose target this would not see). ACLs are not read.
+safe_path() {
+    ancestor=$1
+    while [ "$ancestor" != / ] && [ "$ancestor" != "${FANCURVE_TEST_ROOT:-/}" ]; do
+        if [ -L "$ancestor" ]; then
+            echo "$ancestor is a symbolic link; a root job cannot be installed safely through it" >&2
+            return 1
+        fi
+        if [ -e "$ancestor" ]; then
+            ownership=$(stat -f '%u %Sp' "$ancestor")
+            uid=${ownership%% *}
+            mode=${ownership#* }
+            case "$uid:$mode" in
+            0:?????w*|0:????????w*) safe=0 ;;
+            0:*) safe=1 ;;
+            *) safe=0 ;;
+            esac
+            [ "$safe" = 1 ] || { echo "$ancestor is not owned by root or is writable by others; a root job cannot be installed safely under it" >&2; return 1; }
+        fi
+        ancestor=${ancestor%/*}
+        [ -n "$ancestor" ] || ancestor=/
+    done
+}
 show_status() {
     rc=0
     job=$(as_root launchctl print "system/$label" 2>/dev/null) || rc=$?
@@ -63,22 +90,7 @@ install)
     [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] || { echo "fancurve needs an Apple Silicon Mac" >&2; exit 1; }
     # /usr/bin/cc exists without the tools too (it offers to install them), so ask xcode-select.
     xcode-select -p >/dev/null 2>&1 || { echo "install the Xcode Command Line Tools first: xcode-select --install" >&2; exit 1; }
-    ancestor=${dest%/*}
-    while [ "$ancestor" != / ] && [ "$ancestor" != "${FANCURVE_TEST_ROOT:-/}" ]; do
-        if [ -d "$ancestor" ]; then
-            ownership=$(stat -f '%u %Sp' "$ancestor")
-            uid=${ownership%% *}
-            mode=${ownership#* }
-            case "$uid:$mode" in
-            0:?????w*|0:????????w*) safe=0 ;;
-            0:*) safe=1 ;;
-            *) safe=0 ;;
-            esac
-            [ "$safe" = 1 ] || { echo "$ancestor is not owned by root or is writable by others; a root job cannot be installed safely under it" >&2; exit 1; }
-        fi
-        ancestor=${ancestor%/*}
-        [ -n "$ancestor" ] || ancestor=/
-    done
+    safe_path "$dest" || exit 1
     tmp=
     staged=0
     old_stopped=0
@@ -87,7 +99,7 @@ install)
     # Report only what this run established, and remove temporary build and
     # staged files on failure. Installed files stay available for recovery.
     trap 'exit_status=$?
-    trap "" HUP INT TERM
+    trap "" HUP INT QUIT TERM
     if [ "$phase" = testing ]; then
         if as_root "$dest.new/fancurve" auto; then
             if [ "$old_stopped" = 1 ] || [ "$previous_files" = 1 ]; then
@@ -119,11 +131,12 @@ the previous controller is stopped and its files are still in place."
     testing)
         printf "%s\n" "$report" >&2 ;;
     released) echo "the controller is NOT running; macOS had the fan when the write test ended. Fix the error above and install again." >&2 ;;
-    starting) echo "the new controller was started but is not confirmed running: it may or may not be. Run status." >&2 ;;
+    starting) echo "the new controller is not confirmed running: it may or may not have started. Run status." >&2 ;;
     esac
     exit "$exit_status"' 0
     trap 'exit 129' HUP
     trap 'exit 130' INT
+    trap 'exit 131' QUIT
     trap 'exit 143' TERM
     # An explicit template: macOS mktemp otherwise ignores TMPDIR.
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/fancurve-build.XXXXXX")
@@ -195,6 +208,7 @@ uninstall)
     trap 'exit_status=$?; exit "$exit_status"' 0
     trap 'exit 129' HUP
     trap 'exit 130' INT
+    trap 'exit 131' QUIT
     trap 'exit 143' TERM
     begin_privileged
     loaded=0
@@ -219,6 +233,8 @@ uninstall)
         if [ -x "$candidate" ]; then binary=$candidate; break; fi
     done
     [ -n "$binary" ] || { echo "no controller binary to confirm the fan's mode with; nothing was deleted. Install again, then uninstall." >&2; exit 1; }
+    # It is about to be run as root.
+    safe_path "$binary" || { echo "nothing was deleted" >&2; exit 1; }
     as_root "$binary" auto || { echo "the job is stopped, but the fan is not confirmed back with macOS; nothing was deleted" >&2; exit 1; }
     as_root rm -f "$jobs/$label.plist" "$logs/fancurve.log" "$logs/fancurve.log.1"
     as_root rm -rf "$dest" "$dest.new" "$dest.old"

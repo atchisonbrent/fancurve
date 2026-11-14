@@ -43,7 +43,7 @@ cd fancurve
 ./install.sh
 ```
 
-The installer builds the program, runs the read-only check, asks for your password, runs the write test, and installs. It refuses if `/usr/local` or `/usr/local/libexec` is not owned by root or is writable by other users, because a root job under such a directory could be swapped out.
+The installer builds the program, runs the read-only check, asks for your password, runs the write test, and installs. It refuses if `/usr/local`, `/usr/local/libexec` or the install directory is a symbolic link, is not owned by root, or is writable by group or others, because a root job under such a path could be swapped out. (It reads the permission bits, not access control lists.)
 
 | Where | What |
 |---|---|
@@ -80,7 +80,7 @@ cc -O2 fancurve.c -o fancurve -framework IOKit -framework CoreFoundation
 
 All keys are required. Out-of-range values are refused by `check`, and so by the installer, before the running controller is touched.
 
-The installer's write test is the one thing that can pass `max_rpm`: if `max_rpm` is set within 600 rpm of the fan's minimum, the test's 300 rpm step may have nowhere else to go, and it runs the fan up to 300 rpm past `max_rpm` for a few seconds.
+The installer's write test moves the fan 300 rpm from wherever it is turning: up when that stays within `max_rpm`, otherwise down. Only when neither fits, which needs `max_rpm` set within 600 rpm of the fan's minimum, does it step up past `max_rpm`, for a few seconds.
 
 ### Other Macs: choosing sensors
 
@@ -112,7 +112,7 @@ If no default prefix matches, `./fancurve sensors` lists every temperature key o
 python3 -m unittest discover -s tests
 ```
 
-The control loop, the write test and the installer are tested without hardware, root or launchd: the program has a simulation mode with stand-in hardware, and the installer runs against stand-ins for `sudo` and `launchctl`. What no test reaches is the SMC itself; that is what `check` and the write test are for.
+The control loop, the write test and the installer are tested without hardware, root or launchd: the program has a simulation mode with stand-in hardware, and the installer runs against stand-ins for `sudo` and `launchctl`. What no test reaches is the SMC itself: finding the fan's mode key, enumerating the sensors, and the `check` and `sensors` output run only on a real Mac. That is what `check` and the write test are for.
 
 ## Credit
 

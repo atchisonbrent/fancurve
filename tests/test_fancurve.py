@@ -783,10 +783,10 @@ esac''',
             "all well": ({}, 0, order + ["fancurve status"], "new", ""),
             "check fails": ({"CHECK": "1"}, 1, order[:1], "old", None),
             "release not confirmed": ({"AUTO": "1"}, 1, order[:3], "old", "the fan is NOT confirmed back with macOS"),
-            "start fails": ({"BOOTSTRAP": "1"}, 1, order, "new", "the new controller was started but is not confirmed running: it may or may not be. Run status."),
-            "started but not seen running": ({"UNSEEN": "1"}, 1, order, "new", "the new controller was started but is not confirmed running: it may or may not be. Run status."),
+            "start fails": ({"BOOTSTRAP": "1"}, 1, order, "new", "the new controller is not confirmed running: it may or may not have started. Run status."),
+            "started but not seen running": ({"UNSEEN": "1"}, 1, order, "new", "the new controller is not confirmed running: it may or may not have started. Run status."),
             "cannot ask launchd": ({"QUERY": "5"}, 1, order[:1], "old", "cannot tell whether"),
-            "failed query with running text": ({"POST_QUERY": "5"}, 1, order, "new", "the new controller was started but is not confirmed running: it may or may not be. Run status."),
+            "failed query with running text": ({"POST_QUERY": "5"}, 1, order, "new", "the new controller is not confirmed running: it may or may not have started. Run status."),
             "bootout fails": ({"BOOTOUT": "1"}, 1, order[:2], "old", "it may or may not be running"),
             "job will not stop": ({"STILL_LOADED": "1"}, 1, order[:2], "old", "it may or may not be running"),
         }
@@ -860,6 +860,7 @@ esac''',
         # Stop a temporary copy before its command dispatch: observing real-mode
         # path selection must never reach a real privileged command.
         script = self.root / "path-probe.sh"
+        self.assertEqual(DEPLOY.read_text().count('label=$LABEL\n'), 1, "the probe must stop the copy before it does anything")
         text = DEPLOY.read_text().replace('label=$LABEL\n',
                                          'label=$LABEL\nprintf "%s\\n" "$dest" "$jobs" "$logs" "$PATH"\nexit 0\n')
         script.write_text(text)
@@ -896,6 +897,47 @@ esac''',
                 self.assertEqual((self.root / "trace").read_text().splitlines(), ["cc"] if safe else [])
                 self.assert_build_removed()
                 self.reset_case()
+
+    def test_a_symbolic_link_in_the_install_path_is_refused(self) -> None:
+        # `stat` describes a link, not where it leads, so ownership cannot vouch for one.
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.dest.symlink_to(elsewhere)
+        done = self.invoke("install")
+        self.assertEqual((done.returncode, done.stderr),
+                         (1, f"{self.dest} is a symbolic link; a root job cannot be installed safely through it\n"))
+        self.assertEqual((self.root / "privileged").read_text(), "")
+        self.assertEqual((self.root / "trace").read_text(), "")
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.dest.unlink()
+        # The same for a directory above it.
+        (self.root / "real-parent").mkdir()
+        (self.root / "parent").symlink_to(self.root / "real-parent")
+        script = self.root / "link-probe.sh"
+        text = DEPLOY.read_text()
+        self.assertEqual(text.count('dest=$FANCURVE_TEST_ROOT/dest'), 1)
+        script.write_text(text.replace('dest=$FANCURVE_TEST_ROOT/dest', 'dest=$FANCURVE_TEST_ROOT/parent/dest'))
+        done = subprocess.run(["/bin/sh", str(script), "install"], cwd=self.root, env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual((done.returncode, done.stderr),
+                         (1, f"{self.root / 'parent'} is a symbolic link; a root job cannot be installed safely through it\n"))
+        self.assertEqual((self.root / "privileged").read_text(), "")
+        self.assertEqual(list((self.root / "real-parent").iterdir()), [])
+
+    def test_uninstall_runs_nothing_as_root_from_an_unsafe_path(self) -> None:
+        self.old_install(loaded=False)
+        shutil.copy(self.root / "controller", self.dest / "fancurve")
+        done = self.invoke("uninstall", OWNERSHIP="501 drwxr-xr-x")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("is not owned by root or is writable by others", done.stderr)
+        self.assertEqual(done.stderr.splitlines()[-1], "nothing was deleted")
+        self.assertNotIn("fancurve auto", self.calls.read_text())
+        self.assertTrue((self.dest / "fancurve").exists())
+
+    def test_a_relative_test_root_is_refused(self) -> None:
+        done = subprocess.run(["/bin/sh", str(DEPLOY), "uninstall"], cwd=self.root, capture_output=True, text=True, timeout=5,
+                              env={**self.env, "FANCURVE_TEST_ROOT": "."})
+        self.assertEqual((done.returncode, done.stderr), (1, "FANCURVE_TEST_ROOT is set but is not a test directory\n"))
+        self.assertEqual((self.root / "privileged").read_text(), "")
 
     def reset_case(self) -> None:
         for path in (self.dest, Path(f"{self.dest}.old"), Path(f"{self.dest}.new")):
@@ -963,7 +1005,7 @@ esac''',
         self.assert_build_removed()
 
     def test_signals_during_write_test_reach_cleanup(self) -> None:
-        for sig, code in ((signal.SIGHUP, 129), (signal.SIGINT, 130), (signal.SIGTERM, 143)):
+        for sig, code in ((signal.SIGHUP, 129), (signal.SIGINT, 130), (signal.SIGQUIT, 131), (signal.SIGTERM, 143)):
             with self.subTest(signal=sig):
                 installer = subprocess.Popen(["/bin/sh", str(DEPLOY), "install"], cwd=self.root,
                                              env={**self.env, "SELFTEST_SLEEP": "1"},
@@ -1036,7 +1078,7 @@ esac''')
         cases = [
             ({"AUTO": "1"}, "automatic fan mode could not be confirmed; nothing was installed."),
             ({"JOB_MOVE": "1"}, "the controller is NOT running; macOS had the fan when the write test ended. Fix the error above and install again."),
-            ({"BOOTSTRAP": "1"}, "the new controller was started but is not confirmed running: it may or may not be. Run status."),
+            ({"BOOTSTRAP": "1"}, "the new controller is not confirmed running: it may or may not have started. Run status."),
             ({"READING": "1"}, "fancurve is installed, but the status check found a problem (above)"),
         ]
         for faults, message in cases:
@@ -1155,7 +1197,7 @@ esac''')
 
     def test_uninstall_signals_exit_with_the_signal_status(self) -> None:
         self.stub("launchctl", 'touch "$TEST_ROOT/querying"\n/bin/sleep 2\nexit 113')
-        for sig, code in ((signal.SIGHUP, 129), (signal.SIGINT, 130), (signal.SIGTERM, 143)):
+        for sig, code in ((signal.SIGHUP, 129), (signal.SIGINT, 130), (signal.SIGQUIT, 131), (signal.SIGTERM, 143)):
             with self.subTest(signal=sig):
                 installer = subprocess.Popen(["/bin/sh", str(DEPLOY), "uninstall"], cwd=self.root,
                                              env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
