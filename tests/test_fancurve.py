@@ -357,8 +357,8 @@ class Loop(unittest.TestCase):
                 self.assertEqual(done.stderr, "")
 
     def test_selftest_target_is_chosen_within_the_curve_limits(self) -> None:
-        # Up 300 rpm while that stays within max_rpm (2,400 here), otherwise down 300.
-        for before, target in ((500, 1300), (2100, 2400), (2101, 1801), (2400, 2100), (4900, 4600)):
+        # Up 300 rpm while that stays within max_rpm (2,700 here), otherwise down 300.
+        for before, target in ((500, 1300), (2400, 2700), (2401, 2101), (2700, 2400), (4900, 4600)):
             with self.subTest(before=before):
                 done = subprocess.run([self.binary, "selftest-simulated", str(CONF), f"actual={before}"],
                                       capture_output=True, text=True, timeout=5)
@@ -367,7 +367,7 @@ class Loop(unittest.TestCase):
 
     def test_selftest_goes_past_max_rpm_only_when_no_other_step_fits(self) -> None:
         tight = Path(self.tmp.name) / "tight.conf"
-        tight.write_text(CONF.read_text().replace("max_rpm=2400", "max_rpm=1500"))
+        tight.write_text(CONF.read_text().replace("max_rpm=2700", "max_rpm=1500"))
         for before, target in ((1000, 1300), (1250, 1550), (1300, 1000)):
             with self.subTest(before=before):
                 done = subprocess.run([self.binary, "selftest-simulated", str(tight), f"actual={before}"],

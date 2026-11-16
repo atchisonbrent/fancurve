@@ -8,14 +8,14 @@ Left to macOS, a Mac mini holds its fan near minimum while the chip sits at abou
 
 - Reads the hottest of a group of chip sensors every 2 seconds and acts on the **average of the last 30 seconds**, so a short spike does not move the fan.
 - Below 80 °C, macOS keeps the fan. Nothing changes at the desktop.
-- From 80 °C it holds the fan on a straight line from the fan's minimum to **2,400 rpm at 90 °C**, and the curve never asks for more. That ceiling is the limit on noise.
+- From 80 °C it holds the fan on a straight line from the fan's minimum to **2,700 rpm at 90 °C**, and the curve never asks for more. That ceiling is the limit on noise.
 - It changes speed by at most 25 rpm a second, so the fan does not jump. (The one exception goes downward: a target it finds above the ceiling is brought down to it at once.)
 - Below 74 °C it gives the fan back to macOS.
 - Whenever it cannot do its job (a sensor reading fails, the fan's state cannot be read, a write is refused), it gives the fan back to macOS and says so in its log.
 
 Every number above is a setting in [`fancurve.conf`](fancurve.conf).
 
-The defaults favour quiet over cool. On an M6 Mac mini, which runs games at 97 to 105 °C with the fan at 1,000 rpm when left alone, they hold a light game at about 83 °C and 1,500 rpm. A heavy, sustained one still reaches about 100 °C with the fan at the 2,400 rpm ceiling. Raise `max_rpm` if you want lower temperatures and accept the noise: on that Mac the fan is clearly audible from about 2,100 rpm and loud at its 4,900 rpm maximum.
+The defaults favour quiet over cool. On an M6 Mac mini, which runs games at 97 to 105 °C with the fan at 1,000 rpm when left alone, they hold a light game at about 83 °C and 1,500 rpm. A heavy, sustained one sits at 92 to 99 °C with the fan at the 2,700 rpm ceiling; an earlier session with the ceiling at 2,400 rpm sat at 100 to 104 °C. `max_rpm` is the trade between noise and temperature: on that Mac its owner finds 2,700 rpm unobtrusive and the 4,900 rpm maximum loud.
 
 ## Which Macs
 
@@ -73,7 +73,7 @@ cc -O2 fancurve.c -o fancurve -framework IOKit -framework CoreFoundation
 | `start` | `80` | average temperature (°C) at which fancurve takes the fan |
 | `full` | `90` | temperature at which the line reaches `max_rpm` |
 | `hysteresis` | `6` | the fan goes back to macOS below `start - hysteresis` |
-| `max_rpm` | `2400` | the most the curve will ask for |
+| `max_rpm` | `2700` | the most the curve will ask for |
 | `ramp` | `25` | the most the speed changes in a second, in rpm (a target above `max_rpm` comes down at once) |
 | `interval` | `2` | seconds between readings |
 | `window` | `30` | seconds of readings averaged |
